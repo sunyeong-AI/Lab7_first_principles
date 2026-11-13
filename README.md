@@ -13,7 +13,7 @@ conda env create -f environment.yml
 conda activate lab07-first-principles
 ```
 
-Run the project to reproduce the results:
+### Run the project and check the exit code
 
 **Windows (PowerShell)**
 
@@ -31,7 +31,7 @@ echo $?
 
 An exit code of `0` indicates successful execution.
 
-Run the code quality checks and tests:
+### Run code quality checks and tests
 
 ```bash
 python -m ruff format --check .
