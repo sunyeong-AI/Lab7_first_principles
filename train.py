@@ -2,8 +2,11 @@
 
 import argparse
 from copy import deepcopy
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error
@@ -30,6 +33,9 @@ MAX_LOSS_RATIO = 0.01
 MAX_FINAL_MSE = 1.0
 SHORT_EPOCHS = 5
 LONG_EPOCHS = 30
+PROJECT_EPOCHS = 60
+REPORTS_DIRECTORY = Path(__file__).resolve().parent / "reports"
+RUN_LEARNING_RATES = {"main": LEARNING_RATE, "low_lr": 0.0001, "high_lr": 0.1}
 
 
 def fit_one_batch(
@@ -280,11 +286,205 @@ def main() -> None:
     print("Small-batch learning check: PASS")
 
 
+def run_experiment(
+    run_id: str,
+    learning_rate: float,
+    datasets: tuple[BikeDataset, BikeDataset, BikeDataset],
+) -> dict:
+    """Train one fresh seeded network and retain its restored best weights.
+
+    Runs share prepared datasets and differ only in learning rate. Create
+    independent loaders each time and never iterate over the test loader.
+    """
+    torch.manual_seed(SEED)
+    training_loader, validation_loader, _test_loader = make_loaders(
+        *datasets, batch_size=DEFAULT_BATCH_SIZE, seed=SEED
+    )
+    model = BikeNet(datasets[0].features.shape[1], hidden_sizes=HIDDEN_SIZES)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    print(
+        f"Run {run_id}: epochs={PROJECT_EPOCHS}, hidden_sizes={HIDDEN_SIZES}, "
+        f"batch_size={DEFAULT_BATCH_SIZE}, learning_rate={learning_rate}, "
+        f"loss=MSE, optimizer=Adam, seed={SEED}"
+    )
+    history, best = train_model(
+        model, training_loader, validation_loader, optimizer, PROJECT_EPOCHS
+    )
+    print(
+        f"Run {run_id} best: epoch={best['best_epoch']}, "
+        f"val_loss={best['best_val_loss']:.6f}, "
+        f"val_mae={best['best_val_mae']:.6f}"
+    )
+    return {
+        "run_id": run_id,
+        "model": model,
+        "history": history,
+        "best": best,
+        "hidden_sizes": HIDDEN_SIZES,
+        "learning_rate": learning_rate,
+        "batch_size": DEFAULT_BATCH_SIZE,
+        "epochs": PROJECT_EPOCHS,
+        "seed": SEED,
+        "curve_file": (
+            "learning_curves.png"
+            if run_id == "main"
+            else f"learning_curves_{run_id}.png"
+        ),
+    }
+
+
+def save_learning_curves(
+    history: list[dict[str, int | float]],
+    best_epoch: int,
+    output_path: Path,
+    title: str = "Bike Rental Learning Curves",
+) -> Path:
+    """Save every epoch's MSE curves and mark the lowest-validation-loss epoch."""
+    if not history:
+        raise ValueError("history must contain at least one epoch")
+    best_row = min(history, key=lambda row: row["val_loss"])
+    if best_epoch != best_row["epoch"]:
+        raise ValueError("best_epoch must match the lowest validation loss epoch")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(10, 6), layout="constrained")
+    try:
+        epochs = [row["epoch"] for row in history]
+        axis.plot(epochs, [row["train_loss"] for row in history], label="Training Loss")
+        axis.plot(epochs, [row["val_loss"] for row in history], label="Validation Loss")
+        axis.axvline(
+            best_epoch, color="black", linestyle="--", label=f"Best Epoch: {best_epoch}"
+        )
+        axis.scatter([best_epoch], [best_row["val_loss"]], color="black", zorder=3)
+        axis.set(title=title, xlabel="Epoch", ylabel="Loss (MSE)")
+        axis.legend()
+        axis.grid(alpha=0.25)
+        figure.savefig(output_path, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(figure)
+    return output_path
+
+
+def save_exploratory_plot(frame: pd.DataFrame, output_path: Path) -> Path:
+    """Save the prescribed exploratory scatter plot using all generated rows."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(10, 5.6), layout="constrained")
+    try:
+        axis.scatter(frame["hour"], frame[TARGET], s=12, alpha=0.25)
+        axis.set(
+            title="Bike Rentals by Hour (6,000 Observations)",
+            xlabel="Hour of Day",
+            ylabel="Bike Rentals",
+            xticks=range(0, 24, 2),
+        )
+        axis.grid(alpha=0.25)
+        figure.savefig(output_path, dpi=150, bbox_inches="tight")
+    finally:
+        plt.close(figure)
+    return output_path
+
+
+def save_reports(
+    results: list[dict], selected_run: str, output_directory: Path
+) -> None:
+    """Write actual epoch histories and run summaries without any test metrics.
+
+    best_val_mae belongs to the lowest-loss epoch; min_val_mae is the
+    minimum MAE over all epochs. Final losses belong to the last epoch.
+    """
+    output_directory.mkdir(parents=True, exist_ok=True)
+    history_rows = []
+    experiment_rows = []
+    for result in results:
+        history = result["history"]
+        history_rows.extend({"run_id": result["run_id"], **row} for row in history)
+        experiment_rows.append(
+            {
+                "run_id": result["run_id"],
+                "hidden_sizes": str(result["hidden_sizes"]),
+                "learning_rate": result["learning_rate"],
+                "batch_size": result["batch_size"],
+                "epochs": result["epochs"],
+                "seed": result["seed"],
+                **result["best"],
+                "min_val_mae": min(row["val_mae"] for row in history),
+                "final_train_loss": history[-1]["train_loss"],
+                "final_val_loss": history[-1]["val_loss"],
+                "curve_file": result["curve_file"],
+                "selected": result["run_id"] == selected_run,
+            }
+        )
+    pd.DataFrame(history_rows).to_csv(output_directory / "history.csv", index=False)
+    pd.DataFrame(experiment_rows).to_csv(
+        output_directory / "experiments.csv", index=False
+    )
+
+
+def run_project() -> dict:
+    """Generate validation-only runs and reports, retaining the selected model.
+
+    Prepare data once, fit baselines on training only, and select by best
+    validation MSE. Test evaluation and metrics.json are deliberately deferred.
+    """
+    print("Validation-only project run: test evaluation is deferred.")
+    frame = make_rentals(n=6000, seed=SEED)
+    training_rows, validation_rows, test_rows = make_splits(frame, seed=SEED)
+    preprocessor = make_preprocessor(training_rows[FEATURES])
+    feature_arrays = tuple(
+        preprocessor.transform(rows[FEATURES])
+        for rows in (training_rows, validation_rows, test_rows)
+    )
+    target_arrays = tuple(
+        rows[TARGET].to_numpy() for rows in (training_rows, validation_rows, test_rows)
+    )
+    datasets = tuple(
+        BikeDataset(features, targets)
+        for features, targets in zip(feature_arrays, target_arrays, strict=True)
+    )
+    training_mean, linear_model = fit_baselines(feature_arrays[0], target_arrays[0])
+    baseline_metrics = evaluate_baselines(
+        training_mean, linear_model, feature_arrays[1], target_arrays[1]
+    )
+    print(f"Training target mean: {training_mean:.12f}")
+    for name, value in baseline_metrics.items():
+        print(f"{name}: {value:.12f} rentals")
+    results = [
+        run_experiment(run_id, learning_rate, datasets)
+        for run_id, learning_rate in RUN_LEARNING_RATES.items()
+    ]
+    selected = min(results, key=lambda result: result["best"]["best_val_loss"])
+    for result in results:
+        save_learning_curves(
+            result["history"],
+            result["best"]["best_epoch"],
+            REPORTS_DIRECTORY / result["curve_file"],
+            title=f"Bike Rental Learning Curves: {result['run_id']}",
+        )
+    save_exploratory_plot(frame, REPORTS_DIRECTORY / "hour_vs_rentals.png")
+    save_reports(results, selected["run_id"], REPORTS_DIRECTORY)
+    print(
+        f"Selected run: {selected['run_id']}, "
+        f"best epoch: {selected['best']['best_epoch']}, "
+        f"validation MSE: {selected['best']['best_val_loss']:.6f}, "
+        f"validation MAE: {selected['best']['best_val_mae']:.6f}"
+    )
+    print("Validation reports saved. Test predictions and metrics were not computed.")
+    return {
+        "results": results,
+        "selected_run": selected["run_id"],
+        "selected_model": selected["model"],
+        "baseline_metrics": baseline_metrics,
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--step", type=int, choices=(4, 5), default=4)
+    parser.add_argument("--step", type=int, choices=(4, 5))
     arguments = parser.parse_args()
     if arguments.step == 4:
         main()
-    else:
+    elif arguments.step == 5:
         run_training_checks()
+    else:
+        run_project()
