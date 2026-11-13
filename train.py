@@ -454,7 +454,7 @@ def evaluate_test_models(
                 test_features[sample_count:batch_end], dtype=features.dtype
             )
             expected_targets = torch.as_tensor(
-                test_targets[sample_count:batch_end], dtype=targets.dtype
+                test_targets[sample_count:batch_end].copy(), dtype=targets.dtype
             ).reshape(-1, 1)
             if not torch.equal(features, expected_features) or not torch.equal(
                 targets, expected_targets
