@@ -15,9 +15,21 @@ conda activate lab07-first-principles
 
 Run the project to reproduce the results:
 
+**Windows (PowerShell)**
+
+```powershell
+python train.py
+$LASTEXITCODE
+```
+
+**Linux / macOS (Bash or Zsh)**
+
 ```bash
 python train.py
+echo $?
 ```
+
+An exit code of `0` indicates successful execution.
 
 Run the code quality checks and tests:
 
