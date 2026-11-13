@@ -1,0 +1,40 @@
+{
+  "mae_unit": "bike rentals",
+  "models": {
+    "linear_regression": {
+      "test_mae": 8.762954966667404,
+      "validation_mae": 9.032177567800147
+    },
+    "neural_network": {
+      "test_mae": 2.6121504306793213,
+      "validation_mae": 2.6392593638102215
+    },
+    "training_mean": {
+      "test_mae": 9.84839537037037,
+      "validation_mae": 9.951945370370371
+    }
+  },
+  "seed": 2026,
+  "selection": {
+    "best_epoch": 41,
+    "best_validation_mse": 15.700813407897948,
+    "criterion": "lowest_validation_mse",
+    "selected_run": "main",
+    "settings": {
+      "batch_size": 64,
+      "epochs": 60,
+      "hidden_sizes": [
+        32,
+        16
+      ],
+      "learning_rate": 0.01,
+      "loss": "MSE",
+      "optimizer": "Adam"
+    }
+  },
+  "split_sizes": {
+    "test": 1200,
+    "training": 3600,
+    "validation": 1200
+  }
+}
