@@ -1,6 +1,7 @@
 """Check small-batch learning and train a bike rental network by epoch."""
 
 import argparse
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -318,6 +319,8 @@ def run_experiment(
     return {
         "run_id": run_id,
         "model": model,
+        "best_weights": deepcopy(model.state_dict()),
+        "test_loader": _test_loader,
         "history": history,
         "best": best,
         "hidden_sizes": HIDDEN_SIZES,
@@ -421,13 +424,77 @@ def save_reports(
     )
 
 
+def evaluate_test_models(
+    training_mean: float,
+    linear_model: LinearRegression,
+    selected_model: nn.Module,
+    test_features: np.ndarray,
+    test_targets: np.ndarray,
+    test_loader: DataLoader,
+) -> dict[str, float]:
+    """Measure MAE for three fitted models on the same ordered held-out rows.
+
+    Never fit or update a model. Iterate the neural network loader once,
+    checking its feature/target alignment with the original NumPy arrays.
+    Preserve continuous predictions, including any negative values.
+    """
+    test_features = np.asarray(test_features)
+    test_targets = np.asarray(test_targets).reshape(-1)
+    if test_features.ndim != 2 or len(test_features) != len(test_targets):
+        raise ValueError("test features and targets must have aligned rows")
+    if len(test_targets) == 0:
+        raise ValueError("test data must contain at least one sample")
+    selected_model.eval()
+    prediction_batches = []
+    sample_count = 0
+    with torch.no_grad():
+        for features, targets in test_loader:
+            batch_end = sample_count + len(targets)
+            expected_features = torch.as_tensor(
+                test_features[sample_count:batch_end], dtype=features.dtype
+            )
+            expected_targets = torch.as_tensor(
+                test_targets[sample_count:batch_end], dtype=targets.dtype
+            ).reshape(-1, 1)
+            if not torch.equal(features, expected_features) or not torch.equal(
+                targets, expected_targets
+            ):
+                raise ValueError("test loader rows must match the ordered test arrays")
+            predictions = selected_model(features)
+            if predictions.shape != targets.shape:
+                raise ValueError("prediction and target shapes must match")
+            prediction_batches.append(predictions.reshape(-1).cpu())
+            sample_count = batch_end
+    if sample_count != len(test_targets):
+        raise ValueError("test loader must contain every test row exactly once")
+    neural_predictions = torch.cat(prediction_batches).numpy()
+    mean_predictions = np.full(len(test_targets), training_mean)
+    linear_predictions = linear_model.predict(test_features).reshape(-1)
+    return {
+        "training_mean": float(mean_absolute_error(test_targets, mean_predictions)),
+        "linear_regression": float(
+            mean_absolute_error(test_targets, linear_predictions)
+        ),
+        "neural_network": float(mean_absolute_error(test_targets, neural_predictions)),
+    }
+
+
+def save_metrics(metrics: dict, output_path: Path) -> Path:
+    """Serialize already-computed metrics as finite, reproducible JSON."""
+    serialized = json.dumps(metrics, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(serialized, encoding="utf-8")
+    return output_path
+
+
 def run_project() -> dict:
-    """Generate validation-only runs and reports, retaining the selected model.
+    """Generate all reports and evaluate the validation-selected model last.
 
     Prepare data once, fit baselines on training only, and select by best
-    validation MSE. Test evaluation and metrics.json are deliberately deferred.
+    validation MSE. Only the restored selected network reaches test evaluation.
     """
-    print("Validation-only project run: test evaluation is deferred.")
+    print("Project run: select using validation, then evaluate test rows last.")
     frame = make_rentals(n=6000, seed=SEED)
     training_rows, validation_rows, test_rows = make_splits(frame, seed=SEED)
     preprocessor = make_preprocessor(training_rows[FEATURES])
@@ -469,12 +536,68 @@ def run_project() -> dict:
         f"validation MSE: {selected['best']['best_val_loss']:.6f}, "
         f"validation MAE: {selected['best']['best_val_mae']:.6f}"
     )
-    print("Validation reports saved. Test predictions and metrics were not computed.")
+    best_row = min(selected["history"], key=lambda row: row["val_loss"])
+    if selected["best"]["best_epoch"] != best_row["epoch"]:
+        raise RuntimeError("selected best epoch must minimize validation loss")
+    if not all(
+        torch.equal(value, selected["best_weights"][name])
+        for name, value in selected["model"].state_dict().items()
+    ):
+        raise RuntimeError("selected model weights differ from restored best weights")
+    test_metrics = evaluate_test_models(
+        training_mean,
+        linear_model,
+        selected["model"],
+        feature_arrays[2],
+        target_arrays[2],
+        selected["test_loader"],
+    )
+    metrics = {
+        "seed": SEED,
+        "split_sizes": {
+            "training": len(training_rows),
+            "validation": len(validation_rows),
+            "test": len(test_rows),
+        },
+        "mae_unit": "bike rentals",
+        "selection": {
+            "criterion": "lowest_validation_mse",
+            "selected_run": selected["run_id"],
+            "best_epoch": selected["best"]["best_epoch"],
+            "best_validation_mse": selected["best"]["best_val_loss"],
+            "settings": {
+                "hidden_sizes": list(selected["hidden_sizes"]),
+                "learning_rate": selected["learning_rate"],
+                "batch_size": selected["batch_size"],
+                "epochs": selected["epochs"],
+                "loss": "MSE",
+                "optimizer": "Adam",
+            },
+        },
+        "models": {
+            "training_mean": {
+                "validation_mae": baseline_metrics["training_mean_val_mae"],
+                "test_mae": test_metrics["training_mean"],
+            },
+            "linear_regression": {
+                "validation_mae": baseline_metrics["linear_regression_val_mae"],
+                "test_mae": test_metrics["linear_regression"],
+            },
+            "neural_network": {
+                "validation_mae": selected["best"]["best_val_mae"],
+                "test_mae": test_metrics["neural_network"],
+            },
+        },
+    }
+    save_metrics(metrics, REPORTS_DIRECTORY / "metrics.json")
+    for name, value in test_metrics.items():
+        print(f"{name} test MAE: {value:.12f} rentals")
     return {
         "results": results,
         "selected_run": selected["run_id"],
         "selected_model": selected["model"],
         "baseline_metrics": baseline_metrics,
+        "metrics": metrics,
     }
 
 
