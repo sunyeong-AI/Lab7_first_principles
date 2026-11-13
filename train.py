@@ -3,7 +3,10 @@
 import argparse
 from copy import deepcopy
 
+import numpy as np
 import torch
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -172,6 +175,45 @@ def train_model(
         )
     model.load_state_dict(best_weights)
     return history, best_information
+
+
+def fit_baselines(
+    training_features: np.ndarray, training_targets: np.ndarray
+) -> tuple[float, LinearRegression]:
+    """Fit a target mean and linear regression using training rows only.
+
+    Use the existing training-fitted preprocessor's NumPy output. Targets
+    contain unscaled rental counts and are aligned to one dimension.
+    """
+    training_targets = np.asarray(training_targets).reshape(-1)
+    training_mean = float(training_targets.mean())
+    linear_model = LinearRegression()
+    linear_model.fit(training_features, training_targets)
+    return training_mean, linear_model
+
+
+def evaluate_baselines(
+    training_mean: float,
+    linear_model: LinearRegression,
+    validation_features: np.ndarray,
+    validation_targets: np.ndarray,
+) -> dict[str, float]:
+    """Return validation MAE in rentals for both fitted baselines.
+
+    Align predictions and targets to one dimension without rounding or
+    clipping predictions. This function never fits either baseline.
+    """
+    validation_targets = np.asarray(validation_targets).reshape(-1)
+    mean_predictions = np.full(len(validation_features), training_mean)
+    linear_predictions = linear_model.predict(validation_features).reshape(-1)
+    return {
+        "training_mean_val_mae": float(
+            mean_absolute_error(validation_targets, mean_predictions)
+        ),
+        "linear_regression_val_mae": float(
+            mean_absolute_error(validation_targets, linear_predictions)
+        ),
+    }
 
 
 def run_training_checks() -> None:
